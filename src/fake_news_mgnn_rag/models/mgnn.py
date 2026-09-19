@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import GATv2Conv, HeteroConv
+from torch_geometric.nn import GATv2Conv
 import torch.nn.functional as F
 
 class FeatureProjection(nn.Module):
@@ -22,6 +24,7 @@ class MGNNGATLayer(nn.Module):
     """
     A single Heterogeneous GAT layer using GATv2Conv to compute dynamic attention
     between different modalities (text, image, user, rag_fact).
+    Rewritten manually (instead of HeteroConv) to allow extracting attention weights.
     """
     def __init__(self, hidden_dim: int, num_heads: int = 4, dropout: float = 0.2):
         super().__init__()
@@ -34,6 +37,7 @@ class MGNNGATLayer(nn.Module):
 
         # Define edge types for message passing
         edge_types = [
+        self.edge_types = [
             ('user', 'mentions', 'text'),
             ('text', 'mentioned_by', 'user'),
             ('text', 'consistent_with', 'image'),
@@ -46,6 +50,11 @@ class MGNNGATLayer(nn.Module):
         conv_dict = {
             edge_type: GATv2Conv(
                 in_channels=hidden_dim,
+        # Create GATv2Conv for every edge type.
+        # We use a ModuleDict where keys are string representations of edge types.
+        self.convs = nn.ModuleDict({
+            '__'.join(edge_type): GATv2Conv(
+                in_channels=(hidden_dim, hidden_dim),
                 out_channels=out_channels_per_head,
                 heads=num_heads,
                 concat=True,
@@ -53,6 +62,9 @@ class MGNNGATLayer(nn.Module):
                 add_self_loops=False # HeteroConv typically handles self loops or we add residuals manually
             ) for edge_type in edge_types
         }
+                add_self_loops=False
+            ) for edge_type in self.edge_types
+        })
 
         # We use sum aggregation for messages arriving from different edge types to the same node type
         self.conv = HeteroConv(conv_dict, aggr='sum')
@@ -66,12 +78,47 @@ class MGNNGATLayer(nn.Module):
     def forward(self, x_dict: Dict[str, torch.Tensor], edge_index_dict: Dict[tuple, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # Apply heterogeneous convolution
         out_dict = self.conv(x_dict, edge_index_dict)
+    def forward(
+        self, 
+        x_dict: Dict[str, torch.Tensor], 
+        edge_index_dict: Dict[tuple, torch.Tensor],
+        return_attention_weights: bool = False
+    ):
+        out_dict_list = {}
+        attention_dict = {}
 
         # Apply residuals, layernorm, and dropout
+        # 1. Message passing per edge type
+        for edge_type, edge_index in edge_index_dict.items():
+            src, rel, dst = edge_type
+            edge_key = '__'.join(edge_type)
+            
+            if edge_key not in self.convs:
+                continue
+
+            conv = self.convs[edge_key]
+            
+            x_src = x_dict[src]
+            x_dst = x_dict[dst]
+            
+            if return_attention_weights:
+                out, alpha = conv((x_src, x_dst), edge_index, return_attention_weights=True)
+                attention_dict[edge_type] = alpha
+            else:
+                out = conv((x_src, x_dst), edge_index)
+                
+            if dst not in out_dict_list:
+                out_dict_list[dst] = []
+            out_dict_list[dst].append(out)
+
+        # 2. Aggregation (sum), Residuals, LayerNorm, and Dropout
         result_dict = {}
         for node_type, x in x_dict.items():
             if node_type in out_dict:
                 out = out_dict[node_type]
+            if node_type in out_dict_list:
+                # Sum aggregation
+                out = sum(out_dict_list[node_type])
                 # Dropout
                 out = F.dropout(out, p=self.dropout, training=self.training)
                 # Residual connection
@@ -81,8 +128,11 @@ class MGNNGATLayer(nn.Module):
                 result_dict[node_type] = out
             else:
                 # If a node type receives no messages (e.g. isolated node), just return its input
+                # If a node type receives no messages, just return its input
                 result_dict[node_type] = x
 
+        if return_attention_weights:
+            return result_dict, attention_dict
         return result_dict
 
 class MultimodalGNN(nn.Module):
@@ -113,6 +163,11 @@ class MultimodalGNN(nn.Module):
         ])
 
     def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
+    def forward(
+        self, 
+        data: HeteroData, 
+        return_attention_weights: bool = False
+    ):
         x_dict = data.x_dict
         edge_index_dict = data.edge_index_dict
 
@@ -126,9 +181,17 @@ class MultimodalGNN(nn.Module):
                 h_dict[node_type] = x
 
         # 2. Message Passing layers
+        all_attentions = []
         for layer in self.layers:
             h_dict = layer(h_dict, edge_index_dict)
+            if return_attention_weights:
+                h_dict, att_dict = layer(h_dict, edge_index_dict, return_attention_weights=True)
+                all_attentions.append(att_dict)
+            else:
+                h_dict = layer(h_dict, edge_index_dict, return_attention_weights=False)
 
+        if return_attention_weights:
+            return h_dict, all_attentions
         return h_dict
 
 if __name__ == "__main__":
@@ -186,11 +249,19 @@ if __name__ == "__main__":
 
     # 3. Forward Pass
     out_dict = model(data)
+    # 3. Forward Pass with Attention
+    out_dict, attentions = model(data, return_attention_weights=True)
 
     print("\nForward pass outputs:")
     for k, v in out_dict.items():
         print(f"  {k}: shape {v.shape}")
         assert v.shape[1] == hidden_dim, f"Dimension mismatch for {k}: expected {hidden_dim}, got {v.shape[1]}"
+
+    print("\nAttention extraction verified:")
+    for layer_idx, att_dict in enumerate(attentions):
+        print(f"  Layer {layer_idx}: {len(att_dict)} edge types with attention")
+        for edge_type, (edge_index, alpha) in att_dict.items():
+            print(f"    {edge_type}: alpha shape {alpha.shape}")
 
     print("\nDimensional alignment verified.")
 
