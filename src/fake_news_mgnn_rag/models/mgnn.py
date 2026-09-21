@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional
 from typing import Dict, List, Optional, Tuple, Any
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import GATv2Conv, HeteroConv
 from torch_geometric.nn import GATv2Conv
 import torch.nn.functional as F
 
@@ -36,7 +34,6 @@ class MGNNGATLayer(nn.Module):
         out_channels_per_head = hidden_dim // num_heads
 
         # Define edge types for message passing
-        edge_types = [
         self.edge_types = [
             ('user', 'mentions', 'text'),
             ('text', 'mentioned_by', 'user'),
@@ -46,10 +43,6 @@ class MGNNGATLayer(nn.Module):
             ('rag_fact', 'supports', 'text')
         ]
 
-        # Create HeteroConv using GATv2Conv for every edge type
-        conv_dict = {
-            edge_type: GATv2Conv(
-                in_channels=hidden_dim,
         # Create GATv2Conv for every edge type.
         # We use a ModuleDict where keys are string representations of edge types.
         self.convs = nn.ModuleDict({
@@ -59,15 +52,9 @@ class MGNNGATLayer(nn.Module):
                 heads=num_heads,
                 concat=True,
                 dropout=dropout,
-                add_self_loops=False # HeteroConv typically handles self loops or we add residuals manually
-            ) for edge_type in edge_types
-        }
                 add_self_loops=False
             ) for edge_type in self.edge_types
         })
-
-        # We use sum aggregation for messages arriving from different edge types to the same node type
-        self.conv = HeteroConv(conv_dict, aggr='sum')
 
         # Layer Norms for each node type after message passing
         self.norms = nn.ModuleDict({
@@ -75,38 +62,34 @@ class MGNNGATLayer(nn.Module):
             for node_type in ['text', 'image', 'user', 'rag_fact']
         })
 
-    def forward(self, x_dict: Dict[str, torch.Tensor], edge_index_dict: Dict[tuple, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # Apply heterogeneous convolution
-        out_dict = self.conv(x_dict, edge_index_dict)
     def forward(
-        self, 
-        x_dict: Dict[str, torch.Tensor], 
+        self,
+        x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[tuple, torch.Tensor],
         return_attention_weights: bool = False
     ):
         out_dict_list = {}
         attention_dict = {}
 
-        # Apply residuals, layernorm, and dropout
         # 1. Message passing per edge type
         for edge_type, edge_index in edge_index_dict.items():
             src, rel, dst = edge_type
             edge_key = '__'.join(edge_type)
-            
+
             if edge_key not in self.convs:
                 continue
 
             conv = self.convs[edge_key]
-            
+
             x_src = x_dict[src]
             x_dst = x_dict[dst]
-            
+
             if return_attention_weights:
                 out, alpha = conv((x_src, x_dst), edge_index, return_attention_weights=True)
                 attention_dict[edge_type] = alpha
             else:
                 out = conv((x_src, x_dst), edge_index)
-                
+
             if dst not in out_dict_list:
                 out_dict_list[dst] = []
             out_dict_list[dst].append(out)
@@ -114,8 +97,6 @@ class MGNNGATLayer(nn.Module):
         # 2. Aggregation (sum), Residuals, LayerNorm, and Dropout
         result_dict = {}
         for node_type, x in x_dict.items():
-            if node_type in out_dict:
-                out = out_dict[node_type]
             if node_type in out_dict_list:
                 # Sum aggregation
                 out = sum(out_dict_list[node_type])
@@ -127,7 +108,6 @@ class MGNNGATLayer(nn.Module):
                 out = F.elu(self.norms[node_type](out))
                 result_dict[node_type] = out
             else:
-                # If a node type receives no messages (e.g. isolated node), just return its input
                 # If a node type receives no messages, just return its input
                 result_dict[node_type] = x
 
@@ -162,10 +142,9 @@ class MultimodalGNN(nn.Module):
             for _ in range(num_layers)
         ])
 
-    def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
     def forward(
-        self, 
-        data: HeteroData, 
+        self,
+        data: HeteroData,
         return_attention_weights: bool = False
     ):
         x_dict = data.x_dict
@@ -183,7 +162,6 @@ class MultimodalGNN(nn.Module):
         # 2. Message Passing layers
         all_attentions = []
         for layer in self.layers:
-            h_dict = layer(h_dict, edge_index_dict)
             if return_attention_weights:
                 h_dict, att_dict = layer(h_dict, edge_index_dict, return_attention_weights=True)
                 all_attentions.append(att_dict)
@@ -247,8 +225,6 @@ if __name__ == "__main__":
     for node_type in data.node_types:
         data[node_type].x.requires_grad_(True)
 
-    # 3. Forward Pass
-    out_dict = model(data)
     # 3. Forward Pass with Attention
     out_dict, attentions = model(data, return_attention_weights=True)
 
@@ -283,4 +259,3 @@ if __name__ == "__main__":
         assert grad.abs().sum().item() > 0, f"Zero gradient for {node_type} input!"
 
     print("\nBackward pass & gradient flow verified end-to-end.")
-
