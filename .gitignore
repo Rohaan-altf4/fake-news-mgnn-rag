@@ -12,3 +12,7 @@ wheels/
 # Raw data and processed data
 data/raw/*
 data/vector_db/*
+
+# Environment variables
+.env
+.env.local
