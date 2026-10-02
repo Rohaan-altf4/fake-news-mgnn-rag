@@ -17,7 +17,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "sentence-transformers>=5.6.1",
     "sentencepiece>=0.2.2",
-    "torch>=2.3.0",
+    "torch>=2.6.0",
     "torch-geometric>=2.5.0",
     "torchvision>=0.18.0",
 ]
