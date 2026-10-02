@@ -100,8 +100,8 @@ def train():
         all_labels = []
 
         # Train loop
-        train_pbar = tqdm(enumerate(train_loader), total=2, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
-        for i, batch in train_pbar:
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+        for batch in train_pbar:
             optimizer.zero_grad()
 
             # Construct graph
@@ -126,12 +126,9 @@ def train():
 
             train_pbar.set_postfix({'loss': loss.item()})
 
-            if i >= 1: # Break early for quick test
-                break
-
         train_acc = accuracy_score(all_labels, all_preds)
         train_f1 = f1_score(all_labels, all_preds, zero_division=0)
-        print(f"Epoch {epoch+1} Train - Loss: {total_loss/2:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
+        print(f"Epoch {epoch+1} Train - Loss: {total_loss/len(train_loader):.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
 
         # Validation loop
         model.eval()
@@ -140,8 +137,8 @@ def train():
         val_labels = []
 
         with torch.no_grad():
-            val_pbar = tqdm(enumerate(test_loader), total=2, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
-            for i, batch in val_pbar:
+            val_pbar = tqdm(test_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+            for batch in val_pbar:
                 data = builder(batch)
                 logits = model(data)
                 labels = data['text'].y.float()
@@ -156,12 +153,9 @@ def train():
 
                 val_pbar.set_postfix({'loss': loss.item()})
 
-                if i >= 1:
-                    break
-
         val_acc = accuracy_score(val_labels, val_preds)
         val_f1 = f1_score(val_labels, val_preds, zero_division=0)
-        print(f"Epoch {epoch+1} Val - Loss: {val_loss/2:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
+        print(f"Epoch {epoch+1} Val - Loss: {val_loss/len(test_loader):.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
 
     print("Training complete!")
 
